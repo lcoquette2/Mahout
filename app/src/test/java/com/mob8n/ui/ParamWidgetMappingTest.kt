@@ -315,12 +315,13 @@ class ParamWidgetMappingTest {
     }
 
     @Test fun buildBlockerMessages() {
-        // DESIGN2 §6.6: no key anywhere -> connect first; Nano as (effective) default -> the "needs a cloud provider" text; otherwise none.
-        assertEquals("Connect an AI provider first", buildBlocker(null, false, com.mob8n.ai.NanoStatus.UNAVAILABLE, true))
-        assertEquals(NANO_CANNOT_BUILD, buildBlocker(AI_NANO, true, com.mob8n.ai.NanoStatus.AVAILABLE, false))
-        assertEquals(NANO_CANNOT_BUILD, buildBlocker(null, false, com.mob8n.ai.NanoStatus.AVAILABLE, false))
-        assertEquals(NANO_CANNOT_BUILD, buildBlocker(null, true, com.mob8n.ai.NanoStatus.AVAILABLE, true))
-        assertNull(buildBlocker(null, true, com.mob8n.ai.NanoStatus.AVAILABLE, false))
-        assertNull(buildBlocker("minimax", false, com.mob8n.ai.NanoStatus.UNAVAILABLE, true))
+        val available = com.mob8n.ai.NanoStatus.AVAILABLE
+        val unavailable = com.mob8n.ai.NanoStatus.UNAVAILABLE
+        val downloadable = com.mob8n.ai.NanoStatus.DOWNLOADABLE
+        assertEquals("Connect an AI provider first", buildBlocker(null, false, unavailable))
+        assertNull(buildBlocker(AI_NANO, false, available))
+        assertNull(buildBlocker(null, false, available))
+        assertEquals("Gemini Nano not downloaded — Settings > AI", buildBlocker(AI_NANO, true, downloadable))
+        assertNull(buildBlocker("minimax", false, unavailable))
     }
 }

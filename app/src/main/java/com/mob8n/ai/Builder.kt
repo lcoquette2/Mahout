@@ -34,7 +34,6 @@ object Builder {
     data class Result(val name: String, val graph: Graph, val errors: List<String>, val rounds: Int, val providerLabel: String, val model: String)
     sealed class Progress { data object Asking : Progress(); data object Validating : Progress(); data object Repairing : Progress() }
 
-    const val ERR_NANO = "Build with AI needs a cloud provider — Gemini Nano's 256-token output cannot hold a workflow. Pick a Default AI in Settings > AI"
     const val ERR_NO_JSON = "The AI did not return a workflow JSON"
     const val ERR_TOKENS = "The model ran out of output tokens; shorten the description or pick a larger model"
     private const val MAX_OUT = 8000
@@ -305,6 +304,44 @@ ${compactCatalog(catalog)}
         return errs
     }
 
+    internal fun nanoSystemPrompt(catalog: Catalog, request: String, current: Graph?): String {
+        val terms = Regex("[a-z0-9]+").findAll(request.lowercase())
+            .map { it.value }.filter { it.length >= 3 }.toSet()
+        val currentTypes = current?.nodes.orEmpty().map { it.type }.toSet()
+        val commonTypes = setOf("trigger.manual", "trigger.schedule", "action.notify")
+        val ranked = catalog.nodes.map { it.spec }.map { spec ->
+            val name = "${spec.id} ${spec.name}".lowercase()
+            val description = spec.description.lowercase()
+            val score = terms.fold(0) { total, term -> total + when {
+                term in name -> 3
+                term in description -> 1
+                else -> 0
+            } }
+            spec to score
+        }.sortedByDescending { it.second }.take(12).map { it.first.id }.toSet()
+        val details = catalog.nodes.map { it.spec }
+            .filter { it.id in ranked || it.id in currentTypes || it.id in commonTypes }
+            .joinToString("\n", transform = ::catalogLine)
+        return """
+Return only complete Mahout workflow JSON. Keep it short and use only catalog IDs and valid parameters.
+Example for manual notification:
+{"name":"Reminder","nodes":[{"type":"trigger.manual"},{"type":"action.notify","params":{"title":"Reminder"}}],"edges":[{"from":"n1","to":"n2"}]}
+Omitted node IDs are n1, n2, ... in order. Edge ports default to main. Include fromPort/toPort for other ports.
+Start with a trigger, connect every other node, and avoid cycles. Use {{field}} for incoming values.
+Use typed parameters and omit defaults. Never insert credentials or disable agent approvals.
+Node IDs:
+${catalogIndex(catalog)}
+Details for likely nodes (id|kind|name|description|params|in|out; * = required):
+$details
+""".trim()
+    }
+
+    private suspend fun nanoDraft(system: String, request: String): LlmResult {
+        val result = NanoClient.draftWorkflow("$system\n\n$request")
+        Usage.record(PROVIDER_NANO, result.model, result.usage, "builder", null)
+        return result
+    }
+
     // ---------------------------------------------------------------- build (§6.4)
 
     /** ONE model call, validate, at most ONE repair round. Throws NodeException for provider/Nano/key problems. Cancellation-safe (the HTTP socket is disconnected). */
@@ -313,7 +350,30 @@ ${compactCatalog(catalog)}
         instruction: String? = null, onProgress: (Progress) -> Unit = {}, decisionEngine: Boolean = S1Prefs.isConfigured(android),
     ): Result {
         val t = Llm.defaultTarget(android)
-        if (t.providerId == PROVIDER_NANO) throw NodeException(ERR_NANO)
+        if (t.providerId == PROVIDER_NANO) {
+            val result = run(
+                catalog, description, current, currentName, instruction, t.label, t.model,
+                first = ::nanoDraft,
+                again = { system, messages ->
+                    val prompt = messages.joinToString("\n\n") { message ->
+                        val blocks = message["content"] as? JsonArray
+                        val text = blocks.orEmpty().filterIsInstance<JsonObject>()
+                            .joinToString("\n") { it["text"].asTextOrNull().orEmpty() }
+                        "${message["role"].asTextOrNull()}: $text"
+                    }
+                    val repair = nanoDraft(system, prompt)
+                    Turn(repair.stopReason, buildJsonArray {
+                        add(buildJsonObject { put("type", "text"); put("text", repair.text) })
+                    })
+                },
+                onProgress = onProgress,
+                systemOverride = nanoSystemPrompt(catalog, instruction ?: description, current),
+            )
+            if (result.errors.isNotEmpty()) {
+                throw NodeException("Gemini Nano could not build a valid workflow: ${result.errors.first()}")
+            }
+            return result
+        }
         return run(
             catalog, description, current, currentName, instruction, t.label, t.model,
             first = { system, user -> Llm.completeDirect(android, t, LlmRequest(system, user, jsonMode = true, maxTokens = MAX_OUT, temperature = 0.2, timeoutMs = TIMEOUT_MS)) },
@@ -326,9 +386,9 @@ ${compactCatalog(catalog)}
     internal suspend fun run(
         catalog: Catalog, description: String, current: Graph?, currentName: String?, instruction: String?, providerLabel: String, model: String,
         first: suspend (system: String, user: String) -> LlmResult, again: suspend (system: String, messages: List<JsonObject>) -> Turn,
-        decisionEngine: Boolean = false, onProgress: (Progress) -> Unit = {},
+        decisionEngine: Boolean = false, systemOverride: String? = null, onProgress: (Progress) -> Unit = {},
     ): Result {
-        val system = systemPrompt(catalog, decisionEngine)
+        val system = systemOverride ?: systemPrompt(catalog, decisionEngine)
         val user = userPrompt(description, current, currentName, instruction)
         onProgress(Progress.Asking)
         val r1 = first(system, user)

@@ -170,7 +170,6 @@ class BuilderTest {
     @Test fun noJsonTwiceAndOutOfTokensAreErrors() {
         try { run(Fake("nope", "still nope")); fail() } catch (e: NodeException) { assertEquals(Builder.ERR_NO_JSON, e.message) }
         try { run(Fake("{\"nodes\":[", "x", firstStop = "max_tokens")); fail() } catch (e: NodeException) { assertEquals(Builder.ERR_TOKENS, e.message) }
-        assertEquals(Builder.ERR_NANO.substringBefore(" —"), "Build with AI needs a cloud provider")
     }
 
     @Test fun refineEmbedsTheCurrentGraphJson() {

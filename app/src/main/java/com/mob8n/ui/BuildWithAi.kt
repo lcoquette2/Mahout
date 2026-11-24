@@ -52,6 +52,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.mob8n.ai.AiPrefs
 import com.mob8n.ai.Builder
 import com.mob8n.ai.S1Prefs
+import com.mob8n.ai.NanoClient
 import com.mob8n.ai.NanoStatus
 import com.mob8n.core.Catalog
 import com.mob8n.core.Graph
@@ -69,16 +70,11 @@ private val SUGGESTIONS = listOf(
 )
 private val REFINE_EXAMPLES = listOf("Add a notification on error", "Use Spotify instead of YouTube", "Run only on weekdays")
 
-const val NANO_CANNOT_BUILD = "Build with AI needs a cloud provider — Gemini Nano's 256-token output cannot hold a workflow. Pick a Default AI in Settings > AI"
-
-/** What blocks Generate right now, or null. Mirrors Llm.defaultTarget's chain closely enough for the pre-flight message; Builder is the authority. */
-internal fun buildBlocker(defaultProvider: String?, anyKey: Boolean, nano: NanoStatus, preferOnDevice: Boolean): String? = when {
-    defaultProvider == AI_NANO -> NANO_CANNOT_BUILD
-    defaultProvider != null -> null
-    !anyKey && nano == NanoStatus.AVAILABLE -> NANO_CANNOT_BUILD
-    !anyKey -> "Connect an AI provider first"
-    preferOnDevice && nano == NanoStatus.AVAILABLE -> NANO_CANNOT_BUILD
-    else -> null
+/** What blocks Generate before the builder resolves the selected model. */
+internal fun buildBlocker(defaultProvider: String?, anyKey: Boolean, nano: NanoStatus): String? = when {
+    defaultProvider == AI_NANO -> NanoClient.statusError(nano)?.message
+    defaultProvider != null || anyKey || nano == NanoStatus.AVAILABLE -> null
+    else -> "Connect an AI provider first"
 }
 
 private fun progressText(p: Builder.Progress?, label: String) = when (p) {
@@ -104,8 +100,7 @@ fun BuildWithAiScreen(workflowId: String?, engine: Engine, catalog: Catalog, onB
     val defaultAi by AiPrefs.defaultAi.collectAsStateWithLifecycle()
     val defaultLabel by AiPrefs.defaultLabel.collectAsStateWithLifecycle()
     val nano by AiPrefs.nanoStatus.collectAsStateWithLifecycle()
-    val preferOnDevice by AiPrefs.preferOnDevice.collectAsStateWithLifecycle()
-    val blocker = buildBlocker(defaultAi?.provider, providers.values.any { it.hasKey }, nano, preferOnDevice)
+    val blocker = buildBlocker(defaultAi?.provider, providers.values.any { it.hasKey }, nano)
     val providerLabel = defaultAi?.let { AiPrefs.providerLabel(it.provider) } ?: "the AI"
 
     var description by rememberSaveable(workflowId) { mutableStateOf("") }

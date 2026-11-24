@@ -11,9 +11,9 @@ import com.google.mlkit.genai.prompt.TextPart
 import com.google.mlkit.genai.prompt.generateContentRequest
 import com.mob8n.core.ExecutionContext
 import com.mob8n.core.NodeException
-import kotlinx.coroutines.TimeoutCancellationException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.math.min
 
 enum class NanoStatus { UNKNOWN, UNAVAILABLE, DOWNLOADABLE, DOWNLOADING, AVAILABLE }
@@ -36,7 +36,11 @@ object NanoClient {
             FeatureStatus.DOWNLOADING -> NanoStatus.DOWNLOADING
             else -> NanoStatus.UNAVAILABLE
         }
-    } catch (e: Exception) { NanoStatus.UNAVAILABLE }
+    } catch (e: CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        NanoStatus.UNAVAILABLE
+    }
 
     fun download(): Flow<DownloadStatus> = model.download()
 
@@ -62,7 +66,7 @@ object NanoClient {
             try { ImagePart(Uri.parse(it)) } catch (e: Exception) { throw NodeException("Cannot read image $it: ${e.message}") }
         }
         if (req.maxTokens > MAX_OUTPUT_TOKENS) ctx.log("Gemini Nano maxTokens ${req.maxTokens} clamped to $MAX_OUTPUT_TOKENS")
-        var text = generate(image, prompt, req.maxTokens)
+        var text = generate(image, prompt, min(req.maxTokens, MAX_OUTPUT_TOKENS))
         var usage = Usage.estimate(prompt.length, text.length)                    // no counters on-device: chars/4, estimated (V7)
         if (schema == null) return LlmResult(text, null, "end_turn", PROVIDER_NANO, MODEL_NAME, usage = usage)
         var obj = Llm.parseJsonObject(text)
@@ -71,7 +75,7 @@ object NanoClient {
             val problem = if (obj == null) "it was not a valid JSON object" else "it was missing keys $missing"
             ctx.log("Gemini Nano JSON repair retry: $problem")
             val retry = "$prompt\n\nYour previous answer was rejected because $problem. Previous answer:\n${text.take(1000)}\n\nRespond with ONLY the JSON object."
-            text = generate(image, retry, req.maxTokens)
+            text = generate(image, retry, min(req.maxTokens, MAX_OUTPUT_TOKENS))
             usage += Usage.estimate(retry.length, text.length)
             obj = Llm.parseJsonObject(text)
             missing = obj?.let { Llm.missingKeys(it, schema) } ?: emptyList()
@@ -80,14 +84,25 @@ object NanoClient {
         return LlmResult(text, obj, "end_turn", PROVIDER_NANO, MODEL_NAME, usage = usage)
     }
 
+    /** Workflow drafts need room for graph JSON, while AI workflow nodes use the usual 256-token cap. */
+    internal suspend fun draftWorkflow(prompt: String): LlmResult {
+        statusError(status())?.let { throw it }
+        if (nanoCapChars(prompt, inputTokenLimit(), 0).length < prompt.length) {
+            throw NodeException("This workflow prompt is too large for Gemini Nano. Shorten the request or use another model.")
+        }
+        val text = generate(null, prompt, 1024)
+        return LlmResult(text, null, "end_turn", PROVIDER_NANO, MODEL_NAME, Usage.estimate(prompt.length, text.length))
+    }
+
     private suspend fun generate(image: ImagePart?, prompt: String, maxTokens: Int): String {
-        val request = if (image != null) generateContentRequest(image, TextPart(prompt)) { temperature = 0.2f; maxOutputTokens = min(maxTokens, MAX_OUTPUT_TOKENS) }
-        else generateContentRequest(TextPart(prompt)) { temperature = 0.2f; maxOutputTokens = min(maxTokens, MAX_OUTPUT_TOKENS) }
+        val request = if (image != null) generateContentRequest(image, TextPart(prompt)) { temperature = 0.2f; maxOutputTokens = maxTokens }
+        else generateContentRequest(TextPart(prompt)) { temperature = 0.2f; maxOutputTokens = maxTokens }
         return try {
-            val r = withTimeout(GEN_TIMEOUT_MS) { model.generateContent(request) }
+            val r = withTimeoutOrNull(GEN_TIMEOUT_MS) { model.generateContent(request) }
+                ?: throw NodeException("Gemini Nano timed out after ${GEN_TIMEOUT_MS / 1000} s")
             r.candidates.firstOrNull()?.text ?: ""
-        } catch (e: TimeoutCancellationException) {
-            throw NodeException("Gemini Nano timed out after ${GEN_TIMEOUT_MS / 1000} s")
+        } catch (e: CancellationException) {
+            throw e
         } catch (e: GenAiException) {
             throw NodeException("Gemini Nano error ${e.errorCode}: ${e.message}", e)
         } catch (e: NodeException) {
@@ -102,10 +117,21 @@ object NanoClient {
      * ponytail: ~3 chars/token estimate and the reserve is a char estimate too, upgrade = countTokens() round trip.
      */
     private suspend fun cap(ctx: ExecutionContext, prompt: String, reserve: Int = 0): String {
-        val limit = tokenLimit ?: runCatching { model.getTokenLimit() }.getOrNull()?.also { tokenLimit = it } ?: 4000
+        val limit = inputTokenLimit()
         val capped = nanoCapChars(prompt, limit, reserve)
         if (capped.length < prompt.length) ctx.log("Gemini Nano prompt truncated from ${prompt.length} to ${capped.length} chars (token limit $limit, reserve $reserve)")
         return capped
+    }
+
+    private suspend fun inputTokenLimit(): Int {
+        tokenLimit?.let { return it }
+        return try {
+            model.getTokenLimit().also { tokenLimit = it }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            4000
+        }
     }
 }
 

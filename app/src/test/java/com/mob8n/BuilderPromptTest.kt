@@ -39,6 +39,16 @@ class BuilderPromptTest {
         }
     }
 
+    @Test fun nanoPromptFitsAndItsCompactExampleValidates() {
+        val prompt = Builder.nanoSystemPrompt(catalog, "When I share a link, fetch it and notify me", null)
+        assertTrue(prompt.length < 10_000)
+        assertTrue(prompt.contains("action.notify|"))
+        val example = prompt.lineSequence().first { it.startsWith("{") }
+        val (_, workflow) = Builder.parse(example, catalog).getOrThrow()
+        assertEquals(emptyList<String>(), Builder.validate(workflow, catalog))
+        assertEquals(workflow.nodes.map { it.id }, workflow.edges.single().let { listOf(it.from, it.to) })
+    }
+
     @Test fun systemPromptFitsTheBudgetAndPrintsItsSize() {
         val p = Builder.systemPrompt(catalog)
         println("Build-with-AI system prompt: ${p.length} chars (~${Builder.estimateTokens(p)} tokens at 3 chars/token) over ${catalog.nodes.size} nodes")
